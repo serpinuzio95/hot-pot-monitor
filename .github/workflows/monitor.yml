@@ -1,13 +1,9 @@
-name: Controllo HOT POT 逍遥烫
+name: Controllo HOT POT
 
 on:
   schedule:
-    # 10:30 UTC = 12:30 Italia durante l'ora legale
     - cron: "30 10 * * *"
-
-    # 11:30 UTC = 12:30 Italia durante l'ora solare
     - cron: "30 11 * * *"
-
   workflow_dispatch:
 
 jobs:
@@ -27,15 +23,13 @@ jobs:
           python-version: "3.12"
 
       - name: Installa dipendenze
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Controlla ristorante
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python monitor.py
+        run: python monitor.py
 
       - name: Salva stato precedente
         run: |
