@@ -1,88 +1,76 @@
 import json
 import os
 import re
-from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from urllib.parse import urljoin
 
 import requests
 
 
 GOOGLE_MAPS_URL = "https://maps.app.goo.gl/3HY2zevoNAjenXM87"
-RESTAURANT_NAME = "HOT POT 逍遥烫"
 STATE_FILE = Path("state.json")
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 
 def get_google_maps_page():
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/140.0 Safari/537.36"
-        ),
-        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-    }
-
     response = requests.get(
         GOOGLE_MAPS_URL,
-        headers=headers,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0 Safari/537.36"
+            )
+        },
         timeout=30,
         allow_redirects=True,
     )
+
     response.raise_for_status()
 
-    return response.text, response.url
+    return response.url, response.text
 
 
 def detect_status(html):
-    text = re.sub(r"\s+", " ", html).lower()
+    text = re.sub(r"\s+", " ", html.lower())
 
     permanent_patterns = [
         "permanently closed",
+        "permanentlyclose",
         "chiuso definitivamente",
         "chiusa definitivamente",
-        "chiuso per sempre",
-        "chiusa per sempre",
+        "definitivamente chiuso",
+        "definitivamente chiusa",
     ]
-
-    if any(pattern in text for pattern in permanent_patterns):
-        return "PERMANENTLY_CLOSED"
 
     temporary_patterns = [
         "temporarily closed",
-        "temporarily unavailable",
+        "temporarilyclose",
         "chiuso temporaneamente",
         "chiusa temporaneamente",
+        "temporaneamente chiuso",
+        "temporaneamente chiusa",
     ]
 
-    if any(pattern in text for pattern in temporary_patterns):
-        return "TEMPORARILY_CLOSED"
-
     open_patterns = [
-        '"open"',
         "open now",
-        "aperto ora",
-        "aperta ora",
+        "open",
         "aperto",
         "aperta",
     ]
 
+    if any(pattern in text for pattern in permanent_patterns):
+        return "DEFINITIVAMENTE CHIUSO"
+
+    if any(pattern in text for pattern in temporary_patterns):
+        return "TEMPORANEAMENTE CHIUSO"
+
     if any(pattern in text for pattern in open_patterns):
-        return "OPEN"
+        return "APERTO/OPERATIVO"
 
-    return "UNKNOWN"
-
-
-def status_text(status):
-    return {
-        "OPEN": "🟢 OPERATIVO / APERTO",
-        "TEMPORARILY_CLOSED": "🟠 CHIUSO TEMPORANEAMENTE",
-        "PERMANENTLY_CLOSED": "🔴 CHIUSO DEFINITIVAMENTE",
-        "UNKNOWN": "⚪ STATO NON DETERMINABILE",
-    }.get(status, "⚪ STATO NON DETERMINABILE")
+    return "NON DETERMINATO"
 
 
 def load_previous_status():
@@ -90,33 +78,26 @@ def load_previous_status():
         return None
 
     try:
-        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        with open(STATE_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+
         return data.get("status")
+
     except Exception:
         return None
 
 
 def save_status(status):
-    data = {
-        "status": status,
-        "checked_at": datetime.now(
-            ZoneInfo("Europe/Rome")
-        ).isoformat(),
-    }
-
-    STATE_FILE.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    with open(STATE_FILE, "w", encoding="utf-8") as file:
+        json.dump(
+            {"status": status},
+            file,
+            ensure_ascii=False,
+            indent=2,
+        )
 
 
 def send_telegram(message):
-    if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError("Manca TELEGRAM_BOT_TOKEN.")
-
-    if not TELEGRAM_CHAT_ID:
-        raise RuntimeError("Manca TELEGRAM_CHAT_ID.")
-
     url = (
         f"https://api.telegram.org/bot"
         f"{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -124,82 +105,59 @@ def send_telegram(message):
 
     response = requests.post(
         url,
-        json={
+        data={
             "chat_id": TELEGRAM_CHAT_ID,
             "text": message,
         },
         timeout=30,
     )
+
     response.raise_for_status()
-
-    result = response.json()
-
-    if not result.get("ok"):
-        raise RuntimeError(f"Telegram API error: {result}")
 
 
 def main():
-    print("====================================")
-    print("HOT POT 逍遥烫 - controllo")
-    print("====================================")
+    print("Controllo HOT POT 逍遥烫...")
 
+    final_url, html = get_google_maps_page()
+
+    status = detect_status(html)
     previous_status = load_previous_status()
-    print("Stato precedente:", previous_status)
 
-    html, final_url = get_google_maps_page()
+    print(f"Stato precedente: {previous_status}")
+    print(f"Stato attuale: {status}")
 
-    print("URL finale Google Maps:")
-    print(final_url)
-
-    current_status = detect_status(html)
-    print("Stato attuale:", current_status)
-
-    if current_status == "UNKNOWN":
-        print("ATTENZIONE: stato non riconosciuto.")
-        print("Nessun messaggio Telegram inviato.")
+    if status == "NON DETERMINATO":
+        print("Non è possibile determinare lo stato con sufficiente affidabilità.")
         return
 
     if previous_status is None:
-        save_status(current_status)
-
-        now = datetime.now(ZoneInfo("Europe/Rome"))
         message = (
-            f"📍 {RESTAURANT_NAME}\n\n"
-            f"Stato rilevato:\n"
-            f"{status_text(current_status)}\n\n"
-            f"Controllo iniziale effettuato il "
-            f"{now.strftime('%d/%m/%Y alle %H:%M')}."
+            "🍲 HOT POT 逍遥烫\n\n"
+            f"Stato rilevato: {status}\n\n"
+            f"Google Maps:\n{GOOGLE_MAPS_URL}"
         )
 
         send_telegram(message)
+        save_status(status)
 
-        print("Prima esecuzione: stato salvato.")
-        print("Notifica Telegram inviata.")
+        print("Primo controllo completato.")
         return
 
-    if current_status == previous_status:
-        print("Nessun cambiamento.")
+    if status != previous_status:
+        message = (
+            "🔔 CAMBIAMENTO STATO HOT POT 逍遥烫\n\n"
+            f"Prima: {previous_status}\n"
+            f"Adesso: {status}\n\n"
+            f"Google Maps:\n{GOOGLE_MAPS_URL}"
+        )
+
+        send_telegram(message)
+        save_status(status)
+
+        print("Cambiamento rilevato e inviato su Telegram.")
         return
 
-    save_status(current_status)
-
-    now = datetime.now(ZoneInfo("Europe/Rome"))
-    message = (
-        f"🔔 CAMBIAMENTO STATO\n\n"
-        f"📍 {RESTAURANT_NAME}\n\n"
-        f"Prima:\n"
-        f"{status_text(previous_status)}\n\n"
-        f"Ora:\n"
-        f"{status_text(current_status)}\n\n"
-        f"Controllato il {now.strftime('%d/%m/%Y alle %H:%M')}\n\n"
-        f"🗺️ Google Maps:\n"
-        f"{GOOGLE_MAPS_URL}"
-    )
-
-    send_telegram(message)
-
-    print("CAMBIAMENTO RILEVATO!")
-    print("Notifica Telegram inviata.")
+    print("Nessun cambiamento. Nessun messaggio inviato.")
 
 
 if __name__ == "__main__":
